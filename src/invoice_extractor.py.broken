@@ -1,0 +1,448 @@
+"""
+发票信息提取模块 - 两阶段处理
+阶段1: OCR提取文本 (PaddleOCR)
+阶段2: LLM分析理解 (Qwen3-VL)
+"""
+import os
+import json
+import requests
+from pathlib import Path
+from dotenv import load_dotenv
+
+# 尝试导入PaddleOCR
+try:
+    from paddleocr import PaddleOCR
+    PADDLEOCR_AVAILABLE = True
+except ImportError:
+    PADDLEOCR_AVAILABLE = False
+    print("WARNING: PaddleOCR not installed, will use VLM direct mode")
+    print("   Install: pip install paddleocr paddlepaddle")
+
+# PDF支持
+try:
+    from pdf2image import convert_from_path
+    from PIL import Image
+    PDF_SUPPORT = True
+except ImportError:
+    PDF_SUPPORT = False
+
+# 加载环境变量
+load_dotenv()
+API_URL = os.getenv("API_BASE_URL", "http://45.120.102.120:10021/v1/chat/completions")
+API_KEY = os.getenv("API_KEY", "")
+MODEL_NAME = os.getenv("MODEL_NAME", "Qwen3-VL-235B-A22B-Instruct-FP8")
+
+# 初始化OCR延迟初始化避免启动慢
+_ocr_instance = None
+
+def get_ocr_instance():
+    """获取OCR实例单例模式"""
+    global _ocr_instance
+    if _ocr_instance is None and PADDLEOCR_AVAILABLE:
+        print("[SETUP] 正在初始化 PaddleOCR首次使用会下载模型...")
+        _ocr_instance = PaddleOCR(
+            use_angle_cls=True,  # 启用文字方向检测
+            lang='ch',           # 中文
+            use_gpu=False,       # CPU模式如果有GPU可改为True
+            show_log=False       # 不显示详细日志
+        )
+        print("[OK] PaddleOCR 初始化完成")
+    return _ocr_instance
+
+
+def extract_text_with_ocr(image_path):
+    """
+    阶段1: 使用PaddleOCR提取图片中的文字
+
+    Args:
+        image_path: 图片路径
+
+    Returns:
+        dict: {
+            "texts": ["文字1", "文字2", ...],
+            "full_text": "完整文本",
+            "structured": [{"text": "xxx", "confidence": 0.98, "bbox": [...]}]
+        }
+    """
+    if not PADDLEOCR_AVAILABLE:
+        return None
+
+    try:
+        # 处理PDF
+        if Path(image_path).suffix.lower() == ".pdf":
+            if not PDF_SUPPORT:
+                raise Exception("未安装pdf2image")
+            # 转换PDF第页为图片
+            # poppler在项目根目录不在src目录中
+            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            poppler_path = os.path.join(project_root, "poppler-24.08.0", "Library", "bin")
+            images = convert_from_path(image_path, first_page=1, last_page=1, dpi=150, poppler_path=poppler_path)
+            if images:
+                from io import BytesIO
+                img_byte_arr = BytesIO()
+                images[0].save(img_byte_arr, format='PNG')
+                img_byte_arr.seek(0)
+                # PaddleOCR可以直接处理PIL Image
+                image_to_process = images[0]
+            else:
+                raise Exception("PDF转图片失败")
+        else:
+            image_to_process = image_path
+
+        # OCR识别
+        ocr = get_ocr_instance()
+        result = ocr.ocr(image_to_process, cls=True)
+
+        if not result or not result[0]:
+            return {
+                "texts": [],
+                "full_text": "",
+                "structured": []
+            }
+
+        # 提取文本和置信度
+        texts = []
+        structured = []
+
+        for line in result[0]:
+            bbox = line[0]  # 坐标
+            text_info = line[1]  # (文本, 置信度)
+            text = text_info[0]
+            confidence = text_info[1]
+
+            texts.append(text)
+            structured.append({
+                "text": text,
+                "confidence": round(confidence, 4),
+                "bbox": bbox
+            })
+
+        # 拼接完整文本
+        full_text = "\n".join(texts)
+
+        return {
+            "texts": texts,
+            "full_text": full_text,
+            "structured": structured
+        }
+
+    except Exception as e:
+        print(f"[WARNING] OCR extraction failed: {e}")
+        return None
+
+
+def analyze_with_llm(ocr_text, use_vision=False, image_path=None):
+    """
+    阶段2: 使用LLM分析OCR提取的文本
+
+    Args:
+        ocr_text: OCR提取的文本
+        use_vision: 是否使用视觉模型备用方案
+        image_path: 图片路径use_vision=True时需要
+
+    Returns:
+        dict: {
+            "category": "发票/水单",
+            "amount": "金额",
+            "type": "餐饮/交通/住宿/其他",
+            "date": "YYYYMMDD"
+        }
+    """
+
+    # 构建prompt
+    if use_vision and image_path:
+        # 视觉模式备用
+        import base64
+        with open(image_path, "rb") as f:
+            img_b64 = base64.b64encode(f.read()).decode()
+
+        prompt = """请分析这张图片提取发票/水单信息
+
+返回JSON格式
+{
+  "category": "发票 或 水单",
+  "amount": "金额数字不含符号",
+  "type": "餐饮/交通/住宿/其他",
+  "date": "YYYYMMDD水单必填发票可选"
+}"""
+
+        messages = [
+            {"role": "user", "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}}
+            ]}
+        ]
+    else:
+        # 文本模式推荐
+        prompt = f"""请分析以下OCR提取的发票/水单文本完成信息提取
+
+OCR识别文本
+{ocr_text}
+
+分析任务
+
+1. 判断凭证类型
+   - 发票有发票号码税号等完整信息
+   - 水单支付截图转账记录无发票号码
+
+2. 提取金额
+   - 找到总金额价税合计支付金额等
+   - 只要数字去掉"""元"等符号
+   - 保留小数点
+
+3. 业务分类
+   餐饮餐厅饭店食堂外卖咖啡店奶茶店等餐饮场所
+   交通打车出租车火车飞机租车停车等交通费用
+   住宿酒店宾馆旅馆民宿等住宿场所
+   其他不符合以上类别的或商贸公司批发商等
+
+4. 提取日期
+   - 优先提取开票日期或支付时间
+   - 转换为YYYYMMDD格式如20240115
+
+返回JSON不要其他文字
+{{
+  "category": "发票 或 水单",
+  "amount": "金额数字",
+  "type": "餐饮/交通/住宿/其他",
+  "date": "YYYYMMDD"
+}}"""
+
+        messages = [
+            {"role": "user", "content": prompt}
+        ]
+
+    # 调用API
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {API_KEY}"
+    }
+
+    payload = {
+        "model": MODEL_NAME,
+        "messages": messages,
+        "temperature": 0.1
+    }
+
+    try:
+        resp = requests.post(API_URL, headers=headers, json=payload, timeout=60)
+        if resp.status_code == 200:
+            result = resp.json()
+            content = result["choices"][0]["message"]["content"]
+
+            # 提取JSON
+            if "```json" in content:
+                json_str = content.split("```json")[1].split("```")[0].strip()
+            elif "```" in content:
+                json_str = content.split("```")[1].split("```")[0].strip()
+            else:
+                json_str = content.strip()
+
+            invoice_info = json.loads(json_str)
+            return invoice_info
+        else:
+            print(f"[ERROR] LLM API error: {resp.status_code}")
+            return None
+
+    except Exception as e:
+        print(f"[ERROR] LLM analysis failed: {e}")
+        return None
+
+
+def extract_invoice_info(image_path, mode="auto", enable_validation=True, logger=None):
+    """
+    发票信息提取主函数 - 三重验证版
+
+    Args:
+        image_path: 图片路径
+        mode: 提取模式
+            - "auto": 自动选择优先OCR+LLM降级到VLM
+            - "ocr": 强制使用OCR+LLM
+            - "vision": 强制使用VLM直接识别
+        enable_validation: 是否启用验证Agent默认True
+        logger: 日志实例可选
+
+    Returns:
+        dict: 提取的发票信息如果enable_validation=True包含validation字段
+    """
+    # 获取日志实例
+    if logger is None:
+        try:
+            from logger import get_logger
+            logger = get_logger()
+        except:
+            logger = None
+
+    if logger:
+        logger.processing(f"分析: {os.path.basename(image_path)}")
+        logger.stage("选择处理模式")
+    else:
+        print(f"[SEARCH] 正在分析: {os.path.basename(image_path)}")
+
+    # 模式选择
+    if mode == "vision" or (mode == "auto" and not PADDLEOCR_AVAILABLE):
+        # 方案B: VLM直接识别备用
+        if logger:
+            logger.detail("模式", "VLM直接识别 (备用方案)")
+            logger.stage("调用视觉识别模型")
+        else:
+            print("   使用VLM直接识别模式")
+
+        result = analyze_with_llm(None, use_vision=True, image_path=image_path)
+        if result:
+            if logger:
+                logger.llm_analysis(
+                    result.get("category", "未知"),
+                    result.get("amount", "0"),
+                    result.get("date", "未知"),
+                    result.get("type", "其他")
+                )
+                logger.file_output(f"{result.get('amount')}_{result.get('category')}")
+            else:
+                print(f"[OK] 识别结果: {result}")
+        return result
+
+    # 方案A: OCR + LLM + 验证推荐
+    if logger:
+        logger.detail("模式", "OCR + LLM + 验证 (推荐方案)")
+        logger.stage("OCR文本提取", "1")
+    else:
+        print("   阶段1/3: OCR提取文本...")
+
+    ocr_result = extract_text_with_ocr(image_path)
+
+    if not ocr_result or not ocr_result["full_text"]:
+        if logger:
+            logger.warning("OCR未提取到文本切换到VLM模式")
+        else:
+            print("   [WARN]  OCR未提取到文本切换到VLM模式")
+
+        result = analyze_with_llm(None, use_vision=True, image_path=image_path)
+        if result:
+            if logger:
+                logger.llm_analysis(
+                    result.get("category", "未知"),
+                    result.get("amount", "0"),
+                    result.get("date", "未知"),
+                    result.get("type", "其他")
+                )
+            else:
+                print(f"[OK] 识别结果: {result}")
+        return result
+
+    if logger:
+        logger.success(f"OCR提取完成: {len(ocr_result['texts'])} 行文本")
+        logger.ocr_result(ocr_result["full_text"][:500])
+        logger.stage("LLM语义分析", "2")
+    else:
+        print(f"   [OK] OCR提取完成共 {len(ocr_result['texts'])} 行文本")
+
+    # 阶段2: LLM分析
+    if logger:
+        logger.processing("调用LLM模型进行语义分析")
+    else:
+        print("   阶段2/3: LLM分析文本...")
+
+    llm_result = analyze_with_llm(ocr_result["full_text"], use_vision=False)
+
+    if not llm_result:
+        if logger:
+            logger.error("LLM分析失败")
+        else:
+            print("   [ERROR] LLM分析失败")
+        return None
+
+    if logger:
+        logger.success("LLM分析完成")
+        logger.llm_analysis(
+            llm_result.get("category", "未知"),
+            llm_result.get("amount", "0"),
+            llm_result.get("date", "未知"),
+            llm_result.get("type", "其他")
+        )
+    else:
+        print(f"   [OK] LLM分析完成: {llm_result}")
+
+    # 阶段3: 验证Agent
+    if enable_validation:
+        if logger:
+            logger.stage("三重验证Agent对比", "3")
+            logger.processing("对比OCR结果与LLM结果计算置信度...")
+        else:
+            print("   阶段3/3: 验证Agent验证结果...")
+
+        from validation_agent import validate_extraction
+
+        validation = validate_extraction(ocr_result, llm_result)
+
+        if logger:
+            logger.validation_result(validation['confidence'], validation['warnings'])
+        else:
+            print(f"   验证完成 - 信心度: {validation['confidence']:.1%}")
+            print(f"   {validation['recommendation']}")
+
+            if validation['warnings']:
+                print("   [WARN]  警告:")
+                for warning in validation['warnings'][:3]:
+                    print(f"      - {warning}")
+
+        # 将验证结果附加到返回值
+        llm_result["_validation"] = validation
+        llm_result["_confidence"] = validation["confidence"]
+
+    # 附加OCR原文便于调试
+    llm_result["_ocr_text"] = ocr_result["full_text"]
+
+    if logger:
+        logger.success("数据提取完成准备重命名文件")
+
+    return llm_result
+
+
+def debug_ocr_save(image_path, ocr_result):
+    """保存OCR结果用于调试"""
+    debug_dir = os.path.join(os.path.dirname(image_path), "debug_ocr")
+    os.makedirs(debug_dir, exist_ok=True)
+
+    filename = Path(image_path).stem
+    debug_file = os.path.join(debug_dir, f"{filename}_ocr.json")
+
+    with open(debug_file, "w", encoding="utf-8") as f:
+        json.dump(ocr_result, f, ensure_ascii=False, indent=2)
+
+
+# 兼容旧接口
+def analyze_invoice(image_path):
+    """
+    兼容旧版接口
+    """
+    return extract_invoice_info(image_path, mode="auto")
+
+
+if __name__ == "__main__":
+    # 测试代码
+    import sys
+
+    if len(sys.argv) < 2:
+        print("用法: python invoice_extractor.py <图片路径>")
+        sys.exit(1)
+
+    test_image = sys.argv[1]
+
+    if not os.path.exists(test_image):
+        print(f"[ERROR] 文件不存在: {test_image}")
+        sys.exit(1)
+
+    print("="*60)
+    print("发票信息提取测试")
+    print("="*60)
+
+    result = extract_invoice_info(test_image, mode="auto")
+
+    if result:
+        print("\n" + "="*60)
+        print("提取结果:")
+        print("="*60)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print("\n[ERROR] 提取失败")

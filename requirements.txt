@@ -1,0 +1,7 @@
+requests
+python-dotenv
+pdf2image
+pillow
+paddleocr
+paddlepaddle
+pdfplumber
