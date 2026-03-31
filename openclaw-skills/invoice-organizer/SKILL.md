@@ -1,55 +1,58 @@
 ---
 name: invoice-organizer
-description: Use when the user asks to extract invoice information, OCR invoice PDFs/images, classify invoices by type, rename invoice files by amount/type/date/seller, deduplicate by invoice number, summarize invoice totals, or generate Word reports from invoice batches. Also use for Chinese invoice reimbursement folder cleanup and receipt/invoice organization workflows.
+description: Use when the user asks to extract invoice information from Chinese invoices or receipts, OCR invoice PDFs/images, classify reimbursement materials, rename invoices by amount/type/date/seller, detect duplicates by invoice number, summarize invoice totals, reconcile invoices with receipts/water slips, or generate Word reimbursement reports from batches.
+metadata: {"openclaw":{"emoji":"🧾","os":["linux"],"requires":{"bins":["python3"],"config":["skills.entries.invoice-organizer.enabled"]}}}
 ---
 
 # Invoice Organizer
 
-This skill operates the repository's existing invoice processing pipeline instead of rewriting it.
+Operate the existing invoice processing project instead of reimplementing OCR or renaming logic from scratch.
 
-## Use when
+## Trigger when
 - The user wants to batch-process invoice PDFs/images.
 - The user wants OCR extraction of invoice fields.
-- The user wants invoices renamed and grouped by category.
-- The user wants duplicate invoice detection by invoice number.
-- The user wants summary stats or a Word reimbursement report.
+- The user wants invoices renamed, categorized, deduplicated, or summarized.
+- The user wants reimbursement materials organized, including invoices plus water slips / receipts.
+- The user wants a Word reimbursement report.
 
-## Repository entrypoints
-- Main app: `app.py`
-- Extraction core: `src/invoice_extractor.py`
-- Organizer logic: `src/invoice_organizer.py`
-- Word report generator: `tools/generate_word.py`
+## Project entrypoints
+- Main app: `{baseDir}/../../app.py`
+- Extraction core: `{baseDir}/../../src/invoice_extractor.py`
+- Organizer logic: `{baseDir}/../../src/invoice_organizer.py`
+- Word generator: `{baseDir}/../../tools/generate_word.py`
+- Wrapper script: `{baseDir}/scripts/run_invoice_tool.py`
 
 ## Default workflow
-1. Confirm or locate the input folder containing invoices.
-2. Confirm an output folder if the user cares about where results land.
-3. Check whether `.env` is configured for the LLM endpoint.
-4. Run the existing app/script instead of reimplementing invoice OCR from scratch.
-5. Report:
-   - processed count
-   - success/failed/duplicate count
-   - output path
-   - generated summary/report files
+1. Identify the input folder and desired output folder.
+2. Check whether runtime config/env for the LLM endpoint exists.
+3. Prefer the repository's built-in app flow.
+4. Preserve originals; write outputs to a separate folder.
+5. Report processed count, duplicates, failures, totals, and output path.
 
-## Environment expectations
-The current project expects these env vars in `.env`:
+## Environment
+The underlying project expects these env vars when LLM extraction is enabled:
 - `API_BASE_URL`
 - `API_KEY`
 - `MODEL_NAME`
 
-Optional runtime knobs may also be read by the extraction module.
+If these are missing, inspect the project config before promising full extraction quality.
 
-## Run patterns
-### Batch process a folder
-Use:
-`python app.py <input_folder> <output_folder>`
+## Common tasks
+### Batch organize invoice folder
+Run the wrapper script with an input folder and optional output folder.
 
-### Generate or inspect report outputs
-After processing, inspect generated JSON / Word outputs if present.
+### Reimbursement summary / Word output
+After processing, inspect generated JSON/Word outputs and summarize them for the user.
 
-## Implementation note
-Prefer the repository's built-in code path over ad hoc scripts. Only patch code when the current implementation clearly fails the user's request.
+### Debugging extraction quality
+If fields are wrong, inspect OCR output and prompts in the extraction module before changing business rules.
 
-## Files to read as needed
-- For usage details: `references/usage.md`
-- For architecture and outputs: `references/project-map.md`
+## What not to do
+- Do not rewrite the whole pipeline unless the existing code clearly cannot satisfy the request.
+- Do not mutate or rename originals in place unless the user explicitly asks.
+- Do not assume water-slip matching is active everywhere; inspect current scripts first.
+
+## Read as needed
+- Usage and outputs: `references/usage.md`
+- Project map: `references/project-map.md`
+- Enhancement backlog: `references/enhancement-backlog.md`
