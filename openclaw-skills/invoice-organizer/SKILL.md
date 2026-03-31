@@ -1,6 +1,6 @@
 ---
 name: invoice-organizer
-description: Use when the user asks to extract invoice information from Chinese invoices or receipts, OCR invoice PDFs/images, classify reimbursement materials, rename invoices by amount/type/date/seller, detect duplicates by invoice number, summarize invoice totals, reconcile invoices with receipts/water slips, or generate Word reimbursement reports from batches.
+description: Use when the user asks to extract invoice information from invoice PDFs/images, OCR Chinese invoices, classify invoice files, rename invoices by amount/type/date/seller, detect duplicates by invoice number, summarize invoice totals, or generate invoice Word reports from batches. This skill is for invoice organization only; it does not cover receipt/water-slip reconciliation workflows.
 metadata: {"openclaw":{"emoji":"🧾","os":["linux"],"requires":{"bins":["python3"],"config":["skills.entries.invoice-organizer.enabled"]}}}
 ---
 
@@ -12,8 +12,13 @@ Operate the existing invoice processing project instead of reimplementing OCR or
 - The user wants to batch-process invoice PDFs/images.
 - The user wants OCR extraction of invoice fields.
 - The user wants invoices renamed, categorized, deduplicated, or summarized.
-- The user wants reimbursement materials organized, including invoices plus water slips / receipts.
-- The user wants a Word reimbursement report.
+- The user wants an invoice-only reimbursement folder cleaned up.
+- The user wants a Word report generated from invoice batches.
+
+## Do not use for
+- receipt/water-slip reconciliation
+- payment-slip matching
+- mixed voucher matching workflows outside invoice organization
 
 ## Project entrypoints
 - Main app: `{baseDir}/../../app.py`
@@ -41,7 +46,7 @@ If these are missing, inspect the project config before promising full extractio
 ### Batch organize invoice folder
 Run the wrapper script with an input folder and optional output folder.
 
-### Reimbursement summary / Word output
+### Invoice summary / Word output
 After processing, inspect generated JSON/Word outputs and summarize them for the user.
 
 ### Debugging extraction quality
@@ -50,9 +55,8 @@ If fields are wrong, inspect OCR output and prompts in the extraction module bef
 ## What not to do
 - Do not rewrite the whole pipeline unless the existing code clearly cannot satisfy the request.
 - Do not mutate or rename originals in place unless the user explicitly asks.
-- Do not assume water-slip matching is active everywhere; inspect current scripts first.
+- Do not add water-slip or receipt matching behavior into this skill.
 
 ## Read as needed
 - Usage and outputs: `references/usage.md`
 - Project map: `references/project-map.md`
-- Enhancement backlog: `references/enhancement-backlog.md`
